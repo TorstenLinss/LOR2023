@@ -141,27 +141,9 @@ function [u est]= para_fem(T, K, x, method, ref)
 
       psi= - psi_o - 2*(u-uo)/tau;
     elseif strcmp(method, "IIIC")  % Lobatto IIIC
-      %N= length(x)-2;
-      %I1= [1:2:2*N-1]';
-      %I2= [2:2:2*N];
-      %B= zeros(2*N,1);
-      %A= sparse([], [], [], 2*N, 2*N, 12*N);
-      %A(I1,I1)= (mass(:,2:end-1) + 0.5*tau*stiff(:,2:end-1));
-      %A(I1,I2)= -0.5*tau*stiff(:,2:end-1);
-      %A(I2,I1)= 0.5*tau*stiff(:,2:end-1);
-      %A(I2,I2)= mass(:,2:end-1) + 0.5*tau*stiff(:,2:end-1);
-      %B(I1)= mass*(uo + tau*(f(t-tau,x)-f(t,x))/2);
-      %B(I2)= mass*(uo + tau*(f(t-tau,x)+f(t,x))/2);
-      %w= A\B;
-      %v= [0; w(I1); 0];
-      %u= [0; w(I2); 0];
-
-      w= [(mass(:,2:end-1) + 0.5*tau*stiff(:,2:end-1)), ...
-                        -0.5*tau*stiff(:,2:end-1); ...
-          0.5*tau*stiff(:,2:end-1), ...
-                        mass(:,2:end-1) + 0.5*tau*stiff(:,2:end-1)] \ ...
-            [mass*(uo + tau*(f(t-tau,x)-f(t,x))/2); ...
-             mass*(uo + tau*(f(t-tau,x)+f(t,x))/2)];
+      w= (kron(eye(2), mass(:,2:end-1)) + kron(B, stiff(:,2:end-1))*tau) ...
+           \ (kron([1; 1], mass*uo) ...
+               + tau*reshape(mass*(f(t+(rp-1)*tau,x))*B', [], 1));
       v= [0; w(1:end/2); 0];
       u= [0; w(end/2+1:end); 0];
       
@@ -273,45 +255,24 @@ function alpha= dg2(T, M, p)
   % p+1 basis functions ==> p-1 collocation points
   cp= cos((2*[1:p-1]'-1)*pi/(2*(p-1)));
 
-  % Dirichlet boundary conditions
-  % matrix entries
-  bc = basis([-1; 1], p);
-
   % basis functions at collocation points
   [u up upp]= basis(cp, p);
 
   % compute representation of initial condition
-  alpha= [bc; u] \ [0; 0; u0(cp)];
+  alpha= u \ u0(cp);
 
   % precompute differential operator at collocation points
   L = -diag(a(cp))*upp + diag(b(cp))*up + diag(c(cp))*u;
-
-  z= zeros(size(bc));
-  sysA= zeros(3*(p+1), 3*(p+1));
-  sysf= zeros(3*(p+1), 1);
 
   to= 0;
   for k= 1:M
     t= k*T/M;
     tau= t-to;
 
-    for i= 0:2 % row
-      sysf(i*(p+1)+1:(i+1)*(p+1)) = [0; 0; u*alpha/tau];
-      for j= 0:2 % column
-        if i == j
-          sysA(i*(p+1)+1:(i+1)*(p+1), j*(p+1)+1:(j+1)*(p+1)) ...
-            = [bc; u/tau + B(i+1,j+1)*L];
-        else
-          sysA(i*(p+1)+1:(i+1)*(p+1), j*(p+1)+1:(j+1)*(p+1)) ...
-            = [z; B(i+1,j+1)*L];
-        end
-        sysf(i*(p+1)+3:(i+1)*(p+1)) ...
-          = sysf(i*(p+1)+3:(i+1)*(p+1)) + B(i+1,j+1)*f(t+(rp(j+1)-1)*tau,cp);
-      end
-    end
-    sysy= sysA \ sysf;
-    alpha= sysy(2*(p+1)+1:3*(p+1));
-
+    alpha= [(kron(eye(3), u)/tau + kron(B, L)) \ ...
+            (kron([1; 1; 1], u*alpha)/tau ...
+               + reshape(f(t+(rp-1)*tau,cp)*B', [], 1)) ...
+           ](2*end/3+1:end);
     to= t;
   end
 end % dG2
@@ -327,21 +288,25 @@ function u= eval_poly(alpha, p, x)
 end % eval_poly
 
 function [u up upp]= basis(x, p)
-  % Legendre basis
-  % compute first p+1 basis functions and their 1st and 2nd
+  % - basis of integrated Legendre polynomials of degree 2...p
+  % - this way Dirichlet bcs are built in
+  % - compute basis functions and their 1st and 2nd order
   % derivatives on the mesh x
 
-  u= zeros(length(x), p+1); up= u; upp= u;
-
-  u(:,1)= ones(size(x));      u(:,2)= x;
-  up(:,1)= zeros(size(x));    up(:,2)= ones(size(x));
-  upp(:,1)= zeros(size(x));   upp(:,2)= zeros(size(x));
-
-  % Legendre basis
+  % Legendre polynomials and their derivatives at x
+  P= zeros(length(x), p+1); Pp= P;
+  P(:,1)= 1; P(:,2)= x; Pp(:,2)= 1;
   for i = 1:p-1
-    u(:,i+2)= ((2*i+1)*x.*u(:,i+1) - i*u(:,i))/(i+1);
-    up(:,i+2)= ((2*i+1)*(x.*up(:,i+1)+u(:,i+1)) - i*up(:,i))/(i+1);
-    upp(:,i+2)= ((2*i+1)*(x.*upp(:,i+1)+2*up(:,i+1)) - i*upp(:,i))/(i+1);
+    P(:,i+2)= ((2*i+1)*x.*P(:,i+1) - i*P(:,i))/(i+1);
+    Pp(:,i+2)= ((2*i+1)*(x.*Pp(:,i+1)+P(:,i+1)) - i*Pp(:,i))/(i+1);
+  end
+
+  % integrated Legendre polynomials and their derivatives at x
+  u= zeros(length(x), p-1); up= u; upp= u;
+  for i = 2:p
+    u(:,i-1)= (P(:,i+1)-P(:,i-1))/(2*i-1);
+    up(:,i-1)= P(:,i);
+    upp(:,i-1)= Pp(:,i);
   end
 end % basis
 
@@ -378,7 +343,10 @@ function f= f(t,x)
   % t - time
   % x - mesh
 
-  f= exp(-4*t) + cos(pi*(x+t).^2);
+  f= zeros(length(x), length(t));
+  for i= 1:length(t)
+    f(:,i)= exp(-4*t(i)) + cos(pi*(x+t(i)).^2);
+  end
 end % f
 
 function [gamma kappa0 kappa1 kappa1p kappa2 kappa2p]= green()
